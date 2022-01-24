@@ -1,0 +1,401 @@
+---
+title: "Markov Chains for Sequence Clustering"
+author: "Lauren Flemmer"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install libraries
+library(FNN)
+library(mathjaxr)
+library(tinytex)
+library(gridExtra)
+library(tidyr)
+library(HMM)
+library(TraMineR)
+library(markovchain)
+library(DescTools)
+library(nnet)
+library(RColorBrewer)
+library(tidyverse)
+library(ROSE)
+library(InformationValue)
+library(caTools)
+library(bupaR)
+library(edeaR)
+library(eventdataR)
+library(processmapR)
+library(processmonitR)
+library(xesreadR)
+library(petrinetR)
+library(dplyr)
+library(ggplot2)
+library(bupaR)
+library(lubridate)
+```
+
+_______________________________________________________________________________________________________________________________
+### Sepsis
+Sepsis is a condition that occurs when the body's response to an infection begins to damage its own tissues. Sepsis is extremely life threatening, with around a 40% mortality rate due to its ability to damage organs and cause them to fail. As sepsis becomes worse, blood flow to the brain, heart, kidneys, and other organs decrease. Treatment for sepsis includes antibiotics and to maintain blood flow to organs.
+
+_______________________________________________________________________________________________________________________________
+ 
+### The Data
+The data used for this analysis is a real patient event log obtained from **BupaR's eventdataR package**, and describes **management of sepsis patients**, from their admission to their discharge.
+_______________________________________________________________________________________________________________________________
+
+The goal of this analysis is to develop a way to cluster sepsis patient event sequences using markov chains. 
+
+### Markov Chains
+A markov chain is a **probabilistic model showing a sequence of events**, where the **probability of an event occurring depends only on the event that occurred before it**. Therefore, it is a good way to model the sepsis data, since it consists of many different events occurring over time for each patient. 
+
+_______________________________________________________________________________________________________________________________
+
+```{r, include=FALSE, warning=FALSE, message=FALSE}
+set.seed(2)
+sepsisData <- as.data.frame(sepsis)
+
+sepsisData <- sepsisData %>% filter(!is.na(case_id))
+
+#timestamp variable to type timestamp
+sepsisData$timestamp <- as.POSIXct(sepsisData$timestamp,format="%d-%m-%Y:%H.%M")
+```
+
+#### Splitting up the data
+
+In order to cluster the event sequences, we need pre-defined clusters to assign the sequences to. Therefore, the patients (cases) will be split into test and training sets: the training set will be used to create the initial clusters, and the test set will consist of the sequences of events we are trying to cluster.
+
+```{r, warning=FALSE, message=FALSE}
+#split into test and train sets
+
+# Randomly assign train/test groups to all values of case_id (split by groups)
+groups <-
+  sepsisData %>%
+  select(case_id) %>%
+  distinct(case_id) %>%
+  rowwise() %>%
+  mutate(group = sample(
+    c("train", "test"),
+    1, replace = TRUE, prob = c(0.5, 0.5)))
+
+
+# Join group assignments to data
+sepsisData <- sepsisData %>% left_join(groups)
+
+#training set
+trainingData <- sepsisData %>% filter(group == "train")
+
+#test set
+testData <- sepsisData %>% filter(group == "test")
+
+```
+
+_______________________________________________________________________________________________________________________________
+
+Since we are working with sequences of events, the data will be transformed so the events for each patient are in list format, rather than each event being a single row/observation.
+
+```{r, warning=FALSE, message=FALSE}
+
+#format test and train data "activity" variable to be list of events for each case_id
+trainingDataGrouped <- trainingData %>% arrange(case_id, timestamp) %>% select(case_id, activity) %>% group_by(case_id) %>% mutate(sequence = paste(activity, collapse = ","))
+testDataGrouped <- testData %>% arrange(case_id, timestamp) %>% select(case_id,                                                                                                                                                                                                                                                            activity) %>% group_by(case_id) %>% mutate(sequence = paste(activity, collapse = ","))
+
+trainingDataGrouped <- trainingDataGrouped %>% select(case_id, sequence) %>% unique()
+trainingDataGrouped$sequence <- as.vector(trainingDataGrouped$sequence)
+
+testDataGrouped <- testDataGrouped %>% select(case_id, sequence) %>% unique()
+testDataGrouped$sequence <- as.vector(testDataGrouped$sequence)
+
+trainingDataGrouped$sequence <- strsplit(trainingDataGrouped$sequence, split=",")
+testDataGrouped$sequence <- strsplit(testDataGrouped$sequence, split=",")
+
+head(testDataGrouped, 5)
+```
+This is the new format for the data set- now each row, instead of representing a specific event, represents a patient (case_id). The 'activity' column is now the 'sequence' column, which is a list of each patient's events in the order in which they occurred.
+
+_______________________________________________________________________________________________________________________________
+
+### Cluster creation
+
+The event **"Release A" represents the patient's initial release from the hospital**. However, the data also includes events "Release B", "Release C", "Release D", and "Release E". **If a patient has any of Release B-E in their sequence, they had to return to the hospital for additional treatment, then were released again**. Therefore, I am splitting the patients and their event sequences into the following 2 clusters: 
+
+* **Cluster 1: Patient was readmitted**
+* **Cluster 2: Patient was not readmitted**
+
+By looking at each patient's sequence of events, we know that a patient was not readmitted to the hospital if their last event is "Release A". If the last event of their sequence is not "Release A", then they had to be readmitted for additional treatments. 
+
+```{r, warning=FALSE, message=FALSE}
+
+#get last event of case
+for (i in 1:length(trainingDataGrouped$sequence)) {
+  trainingDataGrouped$lastEvent[i] <- trainingDataGrouped$sequence[[i]][length(trainingDataGrouped$sequence[[i]])]
+}
+for (i in 1:length(testDataGrouped$sequence)) {
+  testDataGrouped$lastEvent[i] <- testDataGrouped$sequence[[i]][length(testDataGrouped$sequence[[i]])]
+}
+
+
+#cases that end with "Release A" (no hospital readmission)
+noReadmissionTrain <- trainingDataGrouped %>% filter(lastEvent == "Release A")
+
+#cases that do not end with "Release A" (hospital readmission)
+readmissionTrain <- trainingDataGrouped %>% filter(lastEvent != "Release A")
+
+testDataGrouped$label <- ifelse(testDataGrouped$lastEvent == "Release A", "Patient Not Readmittted", "Patient Readmitted")
+testDataLabel <- testDataGrouped %>% select(case_id, label)
+
+```
+
+_______________________________________________________________________________________________________________________________
+
+
+For each patient, their "Last event" was obtained, so we can figure out which patients had to be readmitted. Below is a table showing the different "Last events" and their frequencies.
+
+```{r, warning=FALSE, message=FALSE}
+#table of final events in sequences
+table(trainingDataGrouped$lastEvent)
+
+```
+_______________________________________________________________________________________________________________________________
+
+Now that the patients are separated into the 2 groups, those groups will be used to make the markov chains. However, to make the markov chains, the data needs to be in the original format, where each row represented an individual patient event. Right now, it is still in the 'sequence format', where it is grouped by patient, and the patient's events are represented as a single data entry. So, to get the data back to the original format while keeping the 'lastEvent', we will join the original dataset with our new (grouped by patient) dataset.
+
+```{r, warning=FALSE, message=FALSE}
+
+#rejoin with timestamp variable
+noReadmissionTrain <- inner_join(sepsisData, noReadmissionTrain, by = "case_id") %>% select(case_id, activity, timestamp)
+readmissionTrain <- inner_join(sepsisData, readmissionTrain, by = "case_id") %>% select(case_id, activity, timestamp)
+
+testDataGrouped <- inner_join(sepsisData, testDataGrouped, by = "case_id") %>% select(case_id, activity, timestamp)
+
+#order by date
+noReadmissionTrain <- noReadmissionTrain[order(as.Date(noReadmissionTrain$timestamp, format="%d-%m-%Y:%H.%M")),]
+readmissionTrain <- readmissionTrain[order(as.Date(readmissionTrain$timestamp, format="%d-%m-%Y:%H.%M")),]
+
+testDataGrouped <- testDataGrouped[order(as.Date(testDataGrouped$timestamp, format="%d-%m-%Y:%H.%M")),]
+head(testDataGrouped, 5)
+```
+_______________________________________________________________________________________________________________________________
+
+#### Cluster 1: Hospital Readmission
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+#convert data to event log format
+readmissionTrain <- simple_eventlog(eventlog = readmissionTrain, case_id = 'case_id', activity_id = 'activity', timestamp = 'timestamp')
+
+#plot process maps for readmission cluster
+process_map(readmissionTrain, type_edges = performance(mean, "days"))
+
+```
+
+#### Cluster 2: No Hospital Readmission
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#convert data to event log format
+noReadmissionTrain <- simple_eventlog(eventlog = noReadmissionTrain, case_id = 'case_id', activity_id = 'activity', timestamp = 'timestamp')
+
+#plot process map for no readmission cluster
+process_map(noReadmissionTrain, type_edges = performance(mean, "days"))
+
+```
+_______________________________________________________________________________________________________________________________
+
+### Transition Probability Matrices
+
+Now that the data is separated into the 2 groups that represent our 'clusters', the 2 markov chains will be created using the training data. Note that these markov chains are not created with respect to each patient, rather, all events (from all patients) are used as a single 'list' of **chronological** events. For both the **Patient Readmitted** and the **Patient Not Readmitted** markov chains, a transition probability matrix will be obtained, which **stores the probabilities of transitioning from one event to another**.
+
+#### Hospital Readmission Probability Transition Matrix
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+#create markov chain for Readmission
+readmissionHMM <- markovchainFit(data = readmissionTrain$activity)
+
+#get transition probability matrix
+readmissionTransitionProb <- matrix(, nrow = 16, ncol = 16)
+readmissionLabels <- c("Admission IC", "Admission NC", "CRP", "ER Registration", "ER Sepsis Triage", "ER Triage", "IV Antibiotics", "IV Liquid", "LacticAcid", "Leucocytes", "Release A", "Release B", "Release C", "Release D", "Release E", "Return ER")
+
+for (i in 1:16) {
+  for (j in 1:16) {
+  readmissionTransitionProb[i,j] <- readmissionHMM$estimate[i,j]
+  }
+}
+readmissionTransitionProb
+
+```
+
+#### No Hospital Readmission Probability Transition Matrix
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+#CREATE CLUSTERS USING TRAINING DATA
+
+#create markov chain for noReadmission
+noReadmissionHMM <- markovchainFit(data = noReadmissionTrain$activity)
+
+#get transition probability matrix
+noReadmissionTransitionProb <- matrix(, nrow = 16, ncol = 16)
+noReadmissionLabels <- c("Admission IC", "Admission NC", "CRP", "ER Registration", "ER Sepsis Triage", "ER Triage", "IV Antibiotics", "IV Liquid", "LacticAcid", "Leucocytes", "Release A")
+
+for (i in 1:11) {
+  for (j in 1:11) {
+  noReadmissionTransitionProb[i,j] <- noReadmissionHMM$estimate[i,j]
+  }
+}
+
+for (i in 12:16) {
+  for (j in 12:16) {
+    noReadmissionTransitionProb[i,j] <- 0
+  }
+}
+noReadmissionTransitionProb[is.na(noReadmissionTransitionProb)] <- 0
+noReadmissionTransitionProb
+
+```
+
+Note that the **rows** of the matrix represent the **antecedent event**, and the **columns** represent the **consequent event**.
+
+_______________________________________________________________________________________________________________________________
+
+### Clustering patient event sequences
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+#format testData$activity to be list of events for each case_id
+testDataGrouped <- testData %>% arrange(case_id, timestamp) %>% select(case_id, activity) %>% group_by(case_id) %>% mutate(sequence = paste(activity, collapse = ","))
+
+testDataGrouped <- testDataGrouped %>% select(case_id, sequence) %>% unique()
+testDataGrouped$sequence <- as.vector(testDataGrouped$sequence)
+
+testDataGrouped$sequence <- strsplit(testDataGrouped$sequence, split=",")
+
+```
+
+To cluster the sequences, the probability of each **test sequence** occurring in both the "Hospital Readmission" and "No Hospital Readmission" clusters will be **calculated using each cluster's transition probability matrix** using the following formulas. 
+
+![](/Users/laurenflemmer/Desktop/ORNL/POSTER/SEPSIS/eq_viz/markovEQ_A.png)
+![](/Users/laurenflemmer/Desktop/ORNL/POSTER/SEPSIS/eq_viz/markovEQ_B.png)
+
+```{r, warning=FALSE, message=FALSE}
+#create probability df
+clusterProbabilities <- data.frame(readmissionProb = double(), noReadmissionProb = double())
+
+#iterate over rows of dataframe
+for (row in 1:nrow(testDataGrouped)) {
+
+  current_prob_readmission <- 1
+  current_prob_noreadmission <- 1
+  
+  #iterate through sequence of events (up until second-to-last event in sequence)
+  for (item in 1:(length(testDataGrouped$sequence[[row]])-1)) {
+    transitionProb_readmission <- 1
+    transitionProb_noReadmission <- 1
+    
+    #cluster 1 (readmission)
+    state1index_readmission <- which(testDataGrouped$sequence[[row]][item] == readmissionLabels)
+    state2index_readmission <- which(testDataGrouped$sequence[[row]][[item+1]] == readmissionLabels)
+    transitionProb_readmission <- readmissionTransitionProb[state1index_readmission, state2index_readmission]
+    
+    current_prob_readmission <- current_prob_readmission * transitionProb_readmission
+    
+    #cluster 2 (no readmission)
+    state1index_noReadmission <- which(testDataGrouped$sequence[[row]][item] == readmissionLabels)
+    state2index_noReadmission <- which(testDataGrouped$sequence[[row]][item+1] == readmissionLabels)
+    transitionProb_noReadmission <- noReadmissionTransitionProb[state1index_noReadmission, state2index_noReadmission]
+    
+    current_prob_noreadmission <- current_prob_noreadmission * transitionProb_noReadmission
+
+    
+  }
+  #add probabilities for that patient to the clusterProbability df
+  bothProb_vec <- c(testDataGrouped$case_id[row], current_prob_readmission, current_prob_noreadmission)
+
+  clusterProbabilities <- rbind(clusterProbabilities, bothProb_vec)
+}
+
+names(clusterProbabilities)[1] <- "case_id"
+names(clusterProbabilities)[2] <- "readmissionProb"
+names(clusterProbabilities)[3] <- "noReadmissionProb"
+
+```
+
+Now that the probability of the sequence belonging to each cluster is obtained, the **cluster the sequence will be assigned to** is the **cluster with the larger probability**.
+
+```{r, warning=FALSE, message=FALSE}
+
+#assign cluster as group w/ highest probability
+case_id_temp <- clusterProbabilities$case_id
+clusterProb_temp <- clusterProbabilities %>% select(readmissionProb, noReadmissionProb)
+clusterProb_temp$cluster <- colnames(clusterProb_temp)[max.col(clusterProb_temp,ties.method="first")]
+
+clusterProbabilities <- cbind(case_id_temp, clusterProb_temp)
+names(clusterProbabilities)[1] <- "case_id"
+
+clusterProbabilities$cluster <- ifelse(clusterProbabilities$cluster == "readmissionProb", "Patient Readmitted", "Patient Not Readmitted")
+head(clusterProbabilities, 10)
+```
+
+Above, you can see that for each patient (case_id) sequence, a probability they were readmitted, and a probability they weren't readmitted was obtained, and the larger of the two determines the cluster the patient belongs to: **"Patient Readmitted"**, **"Patient Not Readmitted"**
+_______________________________________________________________________________________________________________________________
+
+#### Clustering accuracy
+
+```{r, warning=FALSE, message=FALSE}
+#check accuracy of clusters
+
+joined_results <- inner_join(testDataLabel, clusterProbabilities, by = "case_id")
+
+#transform to binary variable
+joined_results$cluster <- ifelse(joined_results$cluster == "Patient Readmitted", 1, 0)
+joined_results$label <- ifelse(joined_results$label == "Patient Readmitted", 1, 0)
+
+
+mean(joined_results$cluster == joined_results$label)
+
+```
+_______________________________________________________________________________________________________________________________
+
+#### Transition Matrix Validation
+To validate the markov chain transition matrices, the obtained markov chain probability distributions (transition matrices) will be compared to their stationary distributions. The **stationary distribution** of a markov chain is the **long-run** probability distribution of a markov chain, and "describes the distribution of X after a sufficiently long time that the distribution of X does not change any longer". [7] The stationary distribution can thus be treated as the **population probability distribution** of the markov chain. The stationary distribution of a markov chain can be computed by raising it's transition matrix to a high power.
+_______________________________________________________________________________________________________________________________
+
+So, for both the **Hospital Readmission** and **No Hospital Readmission** markov chains, their stationary distributions will be calculated and compared to the transition matrices we obtained from our analysis. They will be compared using **Kullback-Leibler Divergence**, which is used to measure the **dissimilarity between two probability distributions**.
+
+_______________________________________________________________________________________________________________________________
+
+KL-Divergence is calculated row-wise, which is why there are multiple calculations for each markov chain. Since it measures dissimilarity, values **closer to 0** mean that the two distributions are very similar. Therefore, **if a transition matrix and its stationary distribution have a KL-divergence close to 0**, the obtained transition probability matrices for the Hospital Readmission and No Hospital Readmission markov chains are **close to their long-run probability distributions**.
+
+_______________________________________________________________________________________________________________________________
+
+##### Hospital Readmission
+
+```{r, warning=FALSE, message=FALSE}
+
+#Finding equilibrium distribution for markov chain 
+readmission_stationary_dist <- (readmissionTransitionProb^100)
+
+KL.divergence(readmissionTransitionProb, readmission_stationary_dist)
+```
+
+##### No Hospital Readmission
+
+```{r, warning=FALSE, message=FALSE}
+
+#Finding equilibrium distribution for markov chain 
+noReadmission_stationary_dist <- (noReadmissionTransitionProb^100)
+
+KL.divergence(noReadmissionTransitionProb, noReadmission_stationary_dist)
+
+```
+Values of 'NaN' (Not a Number) come from 0/0 calculations, and values of '-Inf' come from any number X/0. From calculating the **KL-Divergence**, we can see that the **Hospital Readmission** transition matrix is very similar to its long-run probability distribution, while the **No Hospital Readmission** transition matrix is very different from its long-run probability distribution.
+_______________________________________________________________________________________________________________________________
+
+### References
+1. https://www.bupar.net/eventdataR.html
+2. https://www.bupar.net/
+3. https://www.researchgate.net/publication/265160829_Applying_Hidden_Markov_Models_to_Process_Mining
+4. https://brilliant.org/wiki/markov-chains/#:~:text=A%20Markov%20chain%20is%20a,possible%20future%20states%20are%20fixed.
+5. https://www.stat.auckland.ac.nz/~fewster/325/notes/ch9.pdf
+6. https://www.statlect.com/fundamentals-of-probability/Kullback-Leibler-divergence
+7. https://stephens999.github.io/fiveMinuteStats/markov_chains_discrete_stationary_dist.html#:~:text=The%20stationary%20distribution%20of%20a%20Markov%20chain%20describes%20the%20distribution,a%20Markov%20chain%20can%20visit.
+8. https://www.math.umd.edu/~immortal/MATH401/ch_markov_chains.pdf

@@ -1,0 +1,453 @@
+---
+title: "Application of process mining and logistic regression to a data set of sepsis managment from admission to discharge"
+author: "Lauren Flemmer and Hilda Klasky"
+output: html_document
+---
+_______________________________________________________________________________________________________________________________
+
+### Outline
+* Overview of the data
+* Data analysis and visualization
+* Model building
+* Model testing and validation
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#install libraries
+library(tinytex)
+library(boot)
+library(DescTools)
+library(nnet)
+library(RColorBrewer)
+library(tidyverse)
+library(ROSE)
+library(InformationValue)
+library(caTools)
+library(bupaR)
+library(edeaR)
+library(eventdataR)
+library(processmapR)
+library(processmonitR)
+library(xesreadR)
+library(petrinetR)
+library(dplyr)
+library(ggplot2)
+library(bupaR)
+library(lubridate)
+```
+
+_______________________________________________________________________________________________________________________________
+### Sepsis
+Sepsis is a condition that occurs when the body's response to an infection begins to damage its own tissues. Sepsis is extremely life threatening, with around a 40% mortality rate due to its ability to damage organs and cause them to fail. As sepsis becomes worse, blood flow to the brain, heart, kidneys, and other organs decrease. Treatment for sepsis includes antibiotics and to maintain blood flow to organs.
+
+_______________________________________________________________________________________________________________________________
+
+### Process Mining
+
+Process mining is a field of data science that allows us to visualize and analyze event logs. Given a data set with case id, event id, and time stamp columns, process mining algorithms, (Alpha Algorithm, Heuristics Miner, Genetic Miner, etc.) generate event logs. These event logs can then be turned into process maps, which allow us to visualize how processes occur, as well as identify any bottlenecks or inefficiencies.
+ 
+The goal of this study is to analyze and better understand event data through process mining. Additionally, we hope to combine logistic regression and process mining to create a model that is both accurate and meaningful. This analysis was completed using the **RStudio** application (https://www.rstudio.com/) and the **BupaR** package (https://www.bupar.net/). 
+_______________________________________________________________________________________________________________________________
+
+### The Data
+The data used for this analysis is a real patient event log obtained from **BupaR's eventdataR package**, and describes **management of sepsis patients**, from their admission to their discharge.
+
+```{r, include=FALSE, warning=FALSE, message=FALSE}
+set.seed(5)
+sepsisData <- as.data.frame(sepsis)
+
+#convert data to event log format
+sepsisData <- simple_eventlog(eventlog = sepsisData, case_id = 'case_id', activity_id = 'activity', timestamp = 'timestamp')
+
+
+test <- sepsisData %>% filter(case_id == "SAA")
+```
+
+_______________________________________________________________________________________________________________________________
+
+The details and descriptive statistics of the data are as follows:
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+head(sepsisData, 5)
+activity_frequency(sepsis, level = "activity")
+
+```
+
+_______________________________________________________________________________________________________________________________
+
+### Methods and Results
+_______________________________________________________________________________________________________________________________
+#### Process Map
+
+A process map illustrates the flow of events, given 3 parameters from our data:
+
+* A Case ID
+* An Event ID
+* A Time Stamp
+
+```{r, warning=FALSE, message=FALSE}
+#plot process map 
+
+process_map(sepsis, type_edges = performance(mean, "days"))
+
+```
+  
+This process map visualizes the workflow of the different "activities" in this data set, and includes the mean processing time in between activities. The number under the activity name denotes the frequency of cases that completed that particular activity.
+
+
+```{r, warning=FALSE, message=FALSE}
+
+oneRelease <- sepsis %>% filter(case_id == "A")
+
+#plot process map 
+process_map(oneRelease, type_edges = performance(mean, "days"))
+process_map(oneRelease)
+```
+
+This process map shows a single case where the patient only has "Release A" in their event sequence, meaning they were not readmitted to the hospital.
+
+
+_______________________________________________________________________________________________________________________________
+
+#### Precedence Diagram
+
+Precedence diagrams are used to illustrate how often two particular events occur consecutively. It shows every possible combination of two events occurring, along with the frequency of that combination in our data set. Combinations with no number or color mean that that specific combination of events did not occur consecutively in the data set.
+```{r, warning=FALSE, message=FALSE}
+
+#plot precedence diagram
+sepsisData %>% precedence_matrix(type = "absolute") %>% plot +
+theme(axis.text.x=element_text(size=10), axis.title.y = element_text(face = "bold", size= 12), axis.title.x = element_text(face = "bold", size= 12), plot.title = element_text(face = "bold", size = 16)) +
+  ggtitle("Precedence Diagram")
+```
+  
+_______________________________________________________________________________________________________________________________
+#### Dotted Chart
+A dotted chart describes the different events that occur in each case over time. Each color dot denotes a different event, and all six cases from our data are represented vertically along the y-axis. The time is shown on the x-axis.
+```{r, warning=FALSE, message=FALSE}
+#plot dotted chart
+sepsisData %>% dotted_chart(x = "relative", y = "start") +
+theme(axis.text.x=element_text(size=10), axis.title.y = element_text(face = "bold", size= 12), axis.title.x = element_text(face = "bold", size= 12), plot.title = element_text(face = "bold", size = 17)) +
+  ggtitle("Activities over time")
+
+```
+
+
+_______________________________________________________________________________________________________________________________
+
+```{r, warning=FALSE, message=FALSE}
+
+ggplot(data = sepsisData, mapping = aes(x = activity, fill = activity)) +
+  geom_bar(fill = "#9BD1E5", color = "#5DB5D5") +
+  theme(axis.text.x=element_text(angle=30, hjust=1, size=9), axis.title.y = element_text(face = "bold", size= 12), axis.title.x = element_text(face = "bold", size= 12), plot.title = element_text(face = "bold", size = 17), legend.position = "none") +
+  ylab("Count") +
+  ggtitle("Activities") +
+  geom_text(aes(label=paste(as.character(round(stat(prop), digits = 4) * 100), '%'), group=1), stat='count', nudge_y=100, size=3)
+
+```
+  
+This bar chart shows the distribution and frequency of activities that occurred.
+_______________________________________________________________________________________________________________________________
+
+
+```{r, warning=FALSE, message=FALSE}
+
+ggplot(data = sepsisData, mapping = aes(x = resource, fill = resource)) +
+  geom_bar(fill = "#9BD1E5", color = "#5DB5D5") +
+  theme(axis.text.x=element_text(hjust=1, size=9), axis.title.y = element_text(face = "bold", size= 12), axis.title.x = element_text(face = "bold", size= 12), plot.title = element_text(face = "bold", size = 17), legend.position = "none") +
+  ylab("Count") +
+  ggtitle("Resources") +
+  geom_text(aes(label=paste(as.character(round(stat(prop), digits = 4) * 100), '%'), group=1), stat='count', nudge_y=165, size=2, face = "bold")
+
+```
+  
+This bar chart shows the distribution and frequency of resources that facilitated each activity.
+_______________________________________________________________________________________________________________________________
+
+
+```{r, warning=FALSE, message=FALSE}
+sepsisAge <- sepsisData %>% filter(!is.na(age))
+
+ggplot(data = sepsisAge, mapping = aes(x = age, fill = age)) +
+  geom_bar(fill = "#9BD1E5", color = "#5DB5D5") +
+  theme(axis.text.x=element_text(hjust=1, size=9), axis.title.y = element_text(face = "bold", size= 12), axis.title.x = element_text(face = "bold", size= 12), plot.title = element_text(face = "bold", size = 17), legend.position = "none") +
+  ylab("Count") +
+  xlab("Age") +
+  ggtitle("Age of patients") +
+  geom_text(aes(label=paste(as.character(round(stat(prop), digits = 4) * 100), '%'), group=1), stat='count', nudge_y=2, size=2.5, face = "bold")
+
+```
+  
+This bar chart shows the distribution and frequency of resources that facilitated each activity.
+_______________________________________________________________________________________________________________________________
+
+### Statistical Modeling
+
+_______________________________________________________________________________________________________________________________
+
+Logistic regressions are similar to linear regressions, except that their output is restricted to the range [0,1]. In other words, the prediction/output is a probability. 
+
+**The goal is to predict the probability that an event is a patient discharge, i.e. Release A, Release B, Release C, Release D, or Release E occurs.**
+
+Therefore, a logistic regression model must be used.
+
+_______________________________________________________________________________________________________________________________
+#### Transform Variables
+
+Since time is an important component of process mining, the "timestamp" variable is important to include in the model. However, for each case, the time that consequent events occur is relative to the time the case is first initiated, or events with Activity = "register request". So, the data must be transformed to account for different cases initiating at different times. The new time variable we will utilize is "timeDiff", which, for each event, is the # of seconds since the case initiated. 
+
+```{r, results="hide", warning=FALSE, message=FALSE}
+#get start time of cases
+firstTime <- sepsisData %>% filter(activity == "ER Registration") 
+firstTime <- firstTime[,c(1,5)]
+sepsisData <- inner_join(sepsisData, firstTime, by = "case_id")
+names(sepsisData)[37] <- "case_begins"
+names(sepsisData)[5] <- "timestamp"
+
+as.POSIXct(sepsisData$timestamp, format = "%Y-%m-%d %H:%M:%OS")
+as.POSIXct(sepsisData$case_begins, format = "%Y-%m-%d %H:%M:%OS")
+
+#create timeDiff
+sepsisData <- sepsisData %>% mutate(timeDiff = timestamp - case_begins)
+
+#change null ages to 0
+sepsisData$age[is.na(sepsisData$age)] <- 0
+
+```
+
+Another variable we will use for modeling is the amount of times a particular event occurs for a patient. So, the count of each event will be obtained for patients.
+
+```{r, warning=FALSE, message=FALSE}
+#add frequency of event in case as new column
+sepsisData <- sepsisData %>% 
+  group_by(case_id, activity) %>% 
+  mutate(frequency = n())
+
+```
+
+
+Since a logistic regression is used to predict a binary variable, the data must be transformed such that each entry in the "Activity" column is
+
+- 1 when activity = "Release A", "Release B", "Release C", "Release D", or "Release E"
+- 0 Otherwise
+
+```{r, warning=FALSE, message=FALSE}
+#make activity column a binary variable
+sepsisData$activity <- ifelse((sepsisData$activity == "Release A" | sepsisData$activity == "Release B" | sepsisData$activity == "Release C" | sepsisData$activity == "Release D" | sepsisData$activity == "Release E"), 1, 0)
+
+```
+_______________________________________________________________________________________________________________________________
+
+
+#### Class Imbalance
+
+```{r, warning=FALSE, message=FALSE}
+
+freqTable <- table(sepsisData$activity)
+
+#change labels to strings for the purpose of plotting
+tempLabels <- sepsisData
+tempLabels$activity <- ifelse(sepsisData$activity == 1, "Patient Discharged", "Patient Not Discharged")
+ggplot(data = tempLabels, mapping = aes(x = activity)) +
+  geom_bar(fill = c("#84A9C0", "#75B09C")) +
+  theme(axis.text.x=element_text(size=10), axis.title.y = element_text(face = "bold", size= 12), axis.title.x = element_text(face = "bold", size= 12), plot.title = element_text(face = "bold", size = 17)) +
+  ylab("Count") +
+  ggtitle("Patient Release Status") +
+  geom_text(aes(label=paste(as.character(round(stat(prop), digits = 4) * 100), '%'), group=1), stat='count', nudge_y=500, size=3)
+
+```
+
+
+We can see that the two binary categories are unbalanced, meaning that the important class we are trying to predict (a patient being discharged) occurs at a much smaller frequency than the less important class (a patient not being discharged). This means that the metrics used to evaluate the final model must account for this class imbalance.
+
+_______________________________________________________________________________________________________________________________
+#### Undersampling
+
+In order to account for the class imbalance, we will **undersample the majority class**, i.e, sample fewer data points from the **"Patient Not Discharged"** class to ensure that it has the same number of data points as the **"Patient Discharged"**.
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+
+table(tempLabels$activity)
+
+```
+
+So, we will sample both the "Patient Discharged" class and the "Patient Not Discharged" class so so they have a 50:50 ratio.
+
+
+```{r,warning=FALSE, message=FALSE}
+#undersample majority class
+dischargedClass <- sepsisData %>% filter(activity == 1)
+notDischargedClass <- sepsisData %>% filter(activity == 0)
+
+notDischargedClass <- notDischargedClass[sample(nrow(notDischargedClass),782),]
+
+sepsisData_new <- rbind(dischargedClass, notDischargedClass)
+
+
+#change labels to strings for the purpose of plotting
+tempLabels_after <- sepsisData_new
+tempLabels_after$activity <- ifelse(sepsisData_new$activity == 1, "Patient Discharged", "Patient Not Discharged")
+
+
+ggplot(data = tempLabels_after, mapping = aes(x = activity)) +
+  geom_bar(fill = c("#84A9C0", "#75B09C")) +
+  theme(axis.text.x=element_text(size=10), axis.title.y = element_text(face = "bold", size= 12), axis.title.x = element_text(face = "bold", size= 12), plot.title = element_text(face = "bold", size = 17)) +
+  ylab("Count") +
+  ggtitle("Patient Release Status") +
+  geom_text(aes(label=paste(as.character(round(stat(prop), digits = 4) * 100), '%'), group=1), stat='count', nudge_y=35, size=3)
+
+
+```
+
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+
+table(tempLabels_after$activity)
+
+```
+
+
+Now, both classes have the same frequency in the data set. 
+
+_______________________________________________________________________________________________________________________________
+
+
+#### Logistic Regression Model
+
+
+```{r, warning=FALSE, message=FALSE}
+
+sepsisData_new <- as.data.frame(sepsisData_new)
+
+#train and test split
+sampleIndx <- sample.split(sepsisData_new, SplitRatio = 0.70)
+sepsisTrain <- subset(sepsisData_new, sampleIndx ==TRUE)
+sepsisTest <- subset(sepsisData_new, sampleIndx ==FALSE)
+sepsisTest_label <- sepsisTest$activity
+
+```
+
+_______________________________________________________________________________________________________________________________
+
+
+```{r, results="hide", echo=FALSE, include=FALSE, warning=FALSE, message=FALSE}
+
+log_reg <- glm(activity ~ timeDiff + age + frequency, data = sepsisTrain, family = binomial("logit"))
+log_reg_prob <- predict(log_reg, type = "response", newdata = sepsisTest)
+
+```
+
+So, the final logistic regression model is:
+
+$P(event\,is\,a\,hospital\,discharge) = \alpha + TimeDiff + Age + Frequency$
+
+Where
+*LRS = Logistic Regression’s Probability of Hospital Discharge in Adult Sepsis Events
+*$\alpha$ = A constant, in this case 18.31
+*Age = The age of the patient
+*TimeDiff = The amount of time (in seconds) it takes for the event to occur after the patient is admitted
+*Frequency = The number of times the event occurs for that particular patient
+_______________________________________________________________________________________________________________________________
+
+
+### Model Evaluation
+
+_______________________________________________________________________________________________________________________________
+
+### ROC Curve
+
+In ROC curve analysis, an ROC curve is often used to determine the cutoff point for classification- i.e. the probability cutoff that determines which probabilities obtained by a logistic regression produce one class (1), and which produce the other class (0). In the context of this problem, we are looking for the number that will be the cutoff point for determining which events are **hospital discharge** ("Release A", "Release B", "Release C", "Release D", or "Release E"), and which are **not hospital discharges** (all other events).
+
+In this case, the optimal cutoff will be the probability cutoff that gives the smallest classification error.
+
+_______________________________________________________________________________________________________________________________
+
+The ROC curve shows the performance of our logistic regression model at all probability cutoffs. It does this by plotting:
+
+- True Positive Rate (the probability that an actual ****"Patient Discharge"**** will be classified as a **"Patient Discharge"**)
+- False Positive Rate (the probability that an actual **"Patient not Discharged"** request will be classified as a **"Patient Discharge"**)
+
+``` {r, warning=FALSE, message=FALSE}
+
+#roc curve
+roc <- roc.curve(sepsisTest$activity, log_reg_prob)
+
+#optimal cutoff
+cutoff <- optimalCutoff(sepsisTest$activity, log_reg_prob, optimiseFor = "misclasserror")
+cutoff
+
+```
+
+So, the probability cutoff that gives the lowest misclassification error is **0.6973357**
+
+_______________________________________________________________________________________________________________________________
+
+#### Summary of Logistic Regression Model
+
+
+Below is the regression output for the logistic regression model. The intercepts and coefficients of the model are provided, as well as statistics such as a Z-score and P-value for each term of the model.
+```{r, warning=FALSE, message=FALSE}
+
+log_reg_pred <- ifelse(log_reg_prob > cutoff, 1, 0)
+summary(log_reg)
+
+```
+
+
+_______________________________________________________________________________________________________________________________
+
+#### Classification Accuracy
+Classification accuracy refers to the % of events that were correctly predicted. In this case, ~50% of events were correctly predicted to be either **A Patient Discharge** or **Patient not Discharged**.
+```{r, warning=FALSE, message=FALSE}
+
+mean(log_reg_pred == sepsisTest_label)
+
+```
+
+_______________________________________________________________________________________________________________________________
+
+Therefore, the logistic regression model $P(event\,is\,a\,hospital\,discharge) = \alpha + TimeDiff + Age + Frequency$ is able to predict whether an event is a rejection or not with **98.9% accuracy**.
+
+
+_______________________________________________________________________________________________________________________________
+
+#### Confusion Matrix
+
+The Confusion Matrix is used to describe the performance of a classification model. It allows us to see the number of test data points that are:
+
+*  **True positives**: The # of events the model predicted as **A Patient Discharge** that are **actually a Patient Discharge**
+*  **False positives**: The # of events the model predicted as **A Patient Discharge** that are **actually a Patient not Discharged**
+*  **True negatives**: The # of events the model predicted as **Patient not Discharged** that are **actually Patient not Discharged**
+*  **False negatives**: The # of events the model predicted as **Patient not Discharged** that are **actually Patient not Discharged**
+
+```{r, warning=FALSE, message=FALSE}
+
+Prediction <- ifelse(log_reg_pred == 1, "Patient Discharge", "Not a Patient Discharge")
+Actual <- ifelse(sepsisTest_label == 1, "Patient Discharge", "Not a Patient Discharge")
+Prediction <- as.factor(Prediction)
+Actual <- as.factor(Actual)
+
+confMatrix <- table(Prediction, Actual)
+confMatrix
+
+```
+
+_______________________________________________________________________________________________________________________________
+
+### Conclusion
+
+The focus of this study was to better understand an sepsis patient data set, and develop a way to predict if a patient will be discharged. The data set was analyzed and visualized to obtain an understanding of its organization and the distributions of its variables and components. A process map illustrating the different types of hospital events was obtained to visualize the event log data and gain an understanding of the order and timely manner in which requests are processed. Finally, a logistic regression model was trained and tested to accurately predict which hospital events are discharges, and which are not.
+Further work can be done to verify and fine-tune this model to obtain a higher classification accuracy.
+
+_______________________________________________________________________________________________________________________________
+
+### References
+1. https://www.bupar.net/eventdataR.html
+2. https://www.bupar.net/
+3. https://towardsdatascience.com/understanding-auc-roc-curve-68b2303cc9c5
+4. https://ncss-wpengine.netdna-ssl.com/wp-content/themes/ncss/pdf/Procedures/NCSS/One_ROC_Curve_and_Cutoff_Analysis.pdf
+5. https://www.mayoclinic.org/diseases-conditions/sepsis/symptoms-causes/syc-20351214
+6. https://www.cdc.gov/sepsis/what-is-sepsis.html
+
+
